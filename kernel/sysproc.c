@@ -37,6 +37,15 @@ sys_wait(void)
 }
 
 uint64
+sys_trace(void)
+{
+  int m;
+  argint(0, &m);
+  myproc()->mask = m;
+  return 0;
+}
+
+uint64
 sys_sbrk(void)
 {
   uint64 addr;

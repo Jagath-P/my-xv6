@@ -150,3 +150,22 @@ printkinit(void)
 {
   initlock(&pr.lock, "pr");
 }
+
+void
+backtrace()
+{
+  uint64 s0_val = r_fp();
+  uint64 ra = *(uint64 *)(s0_val - 8);
+  uint64 caller_fp = *(uint64 *)(s0_val - 16);
+  uint64 stack_top = myproc()->kstack + PGSIZE;
+  uint64 stack_bottom = myproc()->kstack;
+  printk("backtrace: \n");
+  while (s0_val <= stack_top && s0_val >= stack_bottom + 16) {
+    printk("%lx\n", ra);
+    s0_val = caller_fp;
+    if (!(s0_val <= stack_top && s0_val >= stack_bottom + 16))
+      break;
+    ra = *(uint64 *)(s0_val - 8);
+    caller_fp = *(uint64 *)(s0_val - 16);
+  }
+}

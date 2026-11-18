@@ -83,6 +83,44 @@ kvminithart()
   sfence_vma();
 }
 
+int
+mapsuper(pagetable_t pagetable, uint64 va, uint64 pa, int perm)
+{
+  if ((va % SUPERPGSIZE) != 0)
+    panic("mappages: va not aligned");
+
+  if (va >= MAXVA)
+    panic("mapsuper");
+
+  for (int level = 2; level > 1; level--) {
+    pte_t *pte = &pagetable[PX(level, va)];
+    if (*pte & PTE_V) {
+      pagetable = (pagetable_t)PTE2PA(*pte);
+    } else {
+      if ((pagetable = (pde_t *)kalloc()) == 0) {
+        return -1;
+      }
+      memset(pagetable, 0, PGSIZE);
+      *pte = PA2PTE(pagetable) | PTE_V;
+    }
+  }
+  pte_t *pte;
+  pte = &pagetable[PX(1, va)];
+  if (*pte & PTE_V) {
+    if (PTE_LEAF(*pte))
+      panic("mapsuper: remap");
+    // leftover level-0 table from an earlier demote; must be empty
+    pagetable_t old = (pagetable_t)PTE2PA(*pte);
+    for (int i = 0; i < 512; i++)
+      if (old[i] & PTE_V)
+        panic("mapsuper: remap");
+    kfree((void *)old);
+    *pte = 0;
+  }
+  *pte = PA2PTE(pa) | perm | PTE_V;
+  return 0;
+}
+
 // Return the address of the PTE in page table pagetable
 // that corresponds to virtual address va.  If alloc!=0,
 // create any required page-table pages.
@@ -96,15 +134,19 @@ kvminithart()
 //   12..20 -- 9 bits of level-0 index.
 //    0..11 -- 12 bits of byte offset within the page.
 pte_t *
-walk(pagetable_t pagetable, uint64 va, int alloc)
+walk_lvl(pagetable_t pagetable, uint64 va, int alloc, int *lvl)
 {
   if (va >= MAXVA)
-    panic("walk");
+    panic("walk_lvl");
 
   for (int level = 2; level > 0; level--) {
     pte_t *pte = &pagetable[PX(level, va)];
     if (*pte & PTE_V) {
       pagetable = (pagetable_t)PTE2PA(*pte);
+      if (PTE_LEAF(*pte)) {
+        *lvl = level;
+        return pte;
+      }
     } else {
       if (!alloc || (pagetable = (pde_t *)kalloc()) == 0)
         return 0;
@@ -112,9 +154,9 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
       *pte = PA2PTE(pagetable) | PTE_V;
     }
   }
+  *lvl = 0;
   return &pagetable[PX(0, va)];
 }
-
 // Look up a virtual address, return the physical address,
 // or 0 if not mapped.
 // Can only be used to look up user pages.
@@ -127,7 +169,8 @@ walkaddr(pagetable_t pagetable, uint64 va)
   if (va >= MAXVA)
     return 0;
 
-  pte = walk(pagetable, va, 0);
+  int level;
+  pte = walk_lvl(pagetable, va, 0, &level);
   if (pte == 0)
     return 0;
   if ((*pte & PTE_V) == 0)
@@ -135,13 +178,16 @@ walkaddr(pagetable_t pagetable, uint64 va)
   if ((*pte & PTE_U) == 0)
     return 0;
   pa = PTE2PA(*pte);
+  if (level == 1) {
+    pa += va & (SUPERPGSIZE - 1) & ~(PGSIZE - 1);
+  }
   return pa;
 }
 
 // Create PTEs for virtual addresses starting at va that refer to
 // physical addresses starting at pa.
 // va and size MUST be page-aligned.
-// Returns 0 on success, -1 if walk() couldn't
+// Returns 0 on success, -1 if walk_lvl() couldn't
 // allocate a needed page-table page.
 int
 mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
@@ -161,7 +207,8 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
   a = va;
   last = va + size - PGSIZE;
   for (;;) {
-    if ((pte = walk(pagetable, a, 1)) == 0)
+    int level;
+    if ((pte = walk_lvl(pagetable, a, 1, &level)) == 0)
       return -1;
     if (*pte & PTE_V)
       panic("mappages: remap");
@@ -187,6 +234,19 @@ uvmcreate()
   return pagetable;
 }
 
+// Split one 2MB leaf into 512 4KB leaves with the same permissions.
+static void
+demote(pte_t *pte)
+{
+  uint64 pa = PTE2PA(*pte);
+  uint64 flags = PTE_FLAGS(*pte);
+  pagetable_t pagetable = (pagetable_t)kalloc();
+  for (int i = 0; i < 512; i++) {
+    pagetable[i] = PA2PTE((pa + i * PGSIZE)) | flags;
+  }
+  *pte = PA2PTE(pagetable) | PTE_V;
+}
+
 // Remove npages of mappings starting from va. va must be
 // page-aligned. It's OK if the mappings don't exist.
 // Optionally free the physical memory.
@@ -194,16 +254,39 @@ void
 uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 {
   uint64 a;
+  uint64 end = va + npages * PGSIZE;
   pte_t *pte;
+  int sz = PGSIZE;
 
   if ((va % PGSIZE) != 0)
     panic("uvmunmap: not aligned");
 
-  for (a = va; a < va + npages * PGSIZE; a += PGSIZE) {
-    if ((pte = walk(pagetable, a, 0)) == 0) // leaf page table entry allocated?
+  for (a = va; a < end; a += sz) {
+    int level;
+    sz = PGSIZE;
+    if ((pte = walk_lvl(pagetable, a, 0, &level)) ==
+        0) // leaf page table entry allocated?
       continue;
     if ((*pte & PTE_V) == 0) // has physical page been allocated?
       continue;
+    if (PTE_FLAGS(*pte) == PTE_V)
+      panic("uvmunmap: not a leaf");
+    if (level == 1) {
+      uint64 base = a & ~((uint64)SUPERPGSIZE - 1);
+      if (a == base && base + SUPERPGSIZE <= end) {
+        // whole superpage is being removed
+        if (do_free)
+          ksuperfree((void *)PTE2PA(*pte));
+        *pte = 0;
+        sz = SUPERPGSIZE;
+      } else {
+        // partial: split, then revisit the same address as a 4KB page
+        demote(pte);
+        sz = 0;
+      }
+      continue;
+    }
+
     if (do_free) {
       uint64 pa = PTE2PA(*pte);
       kfree((void *)pa);
@@ -219,12 +302,27 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
 {
   char *mem;
   uint64 a;
+  int sz = PGSIZE;
 
   if (newsz < oldsz)
     return oldsz;
 
   oldsz = PGROUNDUP(oldsz);
-  for (a = oldsz; a < newsz; a += PGSIZE) {
+  for (a = oldsz; a < newsz; a += sz) {
+    sz = PGSIZE;
+    if (a % SUPERPGSIZE == 0 && a + SUPERPGSIZE <= newsz) {
+      mem = superkalloc();
+      if (mem != 0) {
+        memset(mem, 0, SUPERPGSIZE);
+        if (mapsuper(pagetable, a, (uint64)mem, PTE_R | PTE_U | xperm) != 0) {
+          ksuperfree(mem);
+          uvmdealloc(pagetable, a, oldsz);
+          return 0;
+        }
+        sz = SUPERPGSIZE;
+        continue;
+      }
+    }
     mem = kalloc();
     if (mem == 0) {
       uvmdealloc(pagetable, a, oldsz);
@@ -302,20 +400,36 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   uint64 pa, i;
   uint flags;
   char *mem;
-
-  for (i = 0; i < sz; i += PGSIZE) {
-    if ((pte = walk(old, i, 0)) == 0)
-      continue; // page table entry hasn't been allocated
-    if ((*pte & PTE_V) == 0)
-      continue; // physical page hasn't been allocated
-    pa = PTE2PA(*pte);
+  int szinc = PGSIZE;
+  for (i = 0; i < sz; i += szinc) {
+    szinc = PGSIZE;
+    int level;
+    if ((pte = walk_lvl(old, i, 0, &level)) == 0)
+      continue;
+    if ((*pte & PTE_V) == 0) {
+      continue;
+    }
     flags = PTE_FLAGS(*pte);
-    if ((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char *)pa, PGSIZE);
-    if (mappages(new, i, PGSIZE, (uint64)mem, flags) != 0) {
-      kfree(mem);
-      goto err;
+    if (level == 1) {
+      szinc = SUPERPGSIZE;
+      pa = PTE2PA(*pte);
+      if ((mem = superkalloc()) == 0) {
+        goto err;
+      }
+      memmove(mem, (char *)pa, SUPERPGSIZE);
+      if (mapsuper(new, i, (uint64)mem, flags) != 0) {
+        ksuperfree(mem);
+        goto err;
+      }
+    } else {
+      pa = PTE2PA(*pte);
+      if ((mem = kalloc()) == 0)
+        goto err;
+      memmove(mem, (char *)pa, PGSIZE);
+      if (mappages(new, i, PGSIZE, (uint64)mem, flags) != 0) {
+        kfree(mem);
+        goto err;
+      }
     }
   }
   return 0;
@@ -331,8 +445,8 @@ void
 uvmclear(pagetable_t pagetable, uint64 va)
 {
   pte_t *pte;
-
-  pte = walk(pagetable, va, 0);
+  int level;
+  pte = walk_lvl(pagetable, va, 0, &level);
   if (pte == 0)
     panic("uvmclear");
   *pte &= ~PTE_U;
@@ -359,7 +473,8 @@ copyout(pagetable_t pagetable, uint64 psz, uint64 dstva, char *src, uint64 len)
       }
     }
 
-    pte = walk(pagetable, va0, 0);
+    int level;
+    pte = walk_lvl(pagetable, va0, 0, &level);
     // forbid copyout over read-only user text pages.
     if ((*pte & PTE_W) == 0)
       return -1;
@@ -480,7 +595,8 @@ vmfault(pagetable_t pagetable, uint64 psz, uint64 va, int read)
 int
 ismapped(pagetable_t pagetable, uint64 va)
 {
-  pte_t *pte = walk(pagetable, va, 0);
+  int level;
+  pte_t *pte = walk_lvl(pagetable, va, 0, &level);
   if (pte == 0) {
     return 0;
   }

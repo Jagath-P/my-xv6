@@ -151,6 +151,10 @@ UPROGS=\
 	$U/_dorphan\
 	$U/_sync\
 	$U/_trace\
+	$U/_proc_demo\
+	$U/_testmemsize\
+	$U/_superpgtest\
+
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

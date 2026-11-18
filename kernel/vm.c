@@ -106,8 +106,17 @@ mapsuper(pagetable_t pagetable, uint64 va, uint64 pa, int perm)
   }
   pte_t *pte;
   pte = &pagetable[PX(1, va)];
-  if (*pte & PTE_V)
-    panic("mappages: remap");
+  if (*pte & PTE_V) {
+    if (PTE_LEAF(*pte))
+      panic("mapsuper: remap");
+    // leftover level-0 table from an earlier demote; must be empty
+    pagetable_t old = (pagetable_t)PTE2PA(*pte);
+    for (int i = 0; i < 512; i++)
+      if (old[i] & PTE_V)
+        panic("mapsuper: remap");
+    kfree((void *)old);
+    *pte = 0;
+  }
   *pte = PA2PTE(pa) | perm | PTE_V;
   return 0;
 }
@@ -169,6 +178,9 @@ walkaddr(pagetable_t pagetable, uint64 va)
   if ((*pte & PTE_U) == 0)
     return 0;
   pa = PTE2PA(*pte);
+  if (level == 1) {
+    pa += va & (SUPERPGSIZE - 1) & ~(PGSIZE - 1);
+  }
   return pa;
 }
 
@@ -220,6 +232,19 @@ uvmcreate()
     return 0;
   memset(pagetable, 0, PGSIZE);
   return pagetable;
+}
+
+// Split one 2MB leaf into 512 4KB leaves with the same permissions.
+static void
+demote(pte_t *pte)
+{
+  uint64 pa = PTE2PA(*pte);
+  uint64 flags = PTE_FLAGS(*pte);
+  pagetable_t pagetable = (pagetable_t)kalloc();
+  for (int i = 0; i < 512; i++) {
+    pagetable[i] = PA2PTE((pa + i * PGSIZE)) | flags;
+  }
+  *pte = PA2PTE(pagetable) | PTE_V;
 }
 
 // Remove npages of mappings starting from va. va must be
@@ -277,26 +302,26 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
 {
   char *mem;
   uint64 a;
-  int sz;
+  int sz = PGSIZE;
 
   if (newsz < oldsz)
     return oldsz;
 
   oldsz = PGROUNDUP(oldsz);
   for (a = oldsz; a < newsz; a += sz) {
+    sz = PGSIZE;
     if (a % SUPERPGSIZE == 0 && a + SUPERPGSIZE <= newsz) {
       mem = superkalloc();
-      if (mem == 0) {
-        uvmdealloc(pagetable, a, oldsz);
-        return 0;
+      if (mem != 0) {
+        memset(mem, 0, SUPERPGSIZE);
+        if (mapsuper(pagetable, a, (uint64)mem, PTE_R | PTE_U | xperm) != 0) {
+          ksuperfree(mem);
+          uvmdealloc(pagetable, a, oldsz);
+          return 0;
+        }
+        sz = SUPERPGSIZE;
+        continue;
       }
-      if (mapsuper(pagetable, a, (uint64)mem, PTE_R | PTE_U | xperm) != 0) {
-        ksuperfree(mem);
-        uvmdealloc(pagetable, a, oldsz);
-        return 0;
-      }
-      sz = SUPERPGSIZE;
-      continue;
     }
     mem = kalloc();
     if (mem == 0) {

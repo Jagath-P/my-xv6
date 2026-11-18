@@ -40,11 +40,11 @@ free_super_pages(void *pa_start, void *pa_end)
   char *p;
   p = (char *)SUPERPGROUNDUP((uint64)pa_start);
   for (int i = 0; i < 16; i++) {
-    ksuperfree(p);
-    p = p + SUPERPGSIZE;
-    if (p > (char *)pa_end) {
+    if (p + SUPERPGSIZE > (char *)pa_end)
       break;
-    }
+    ksuperfree(p);
+    p += SUPERPGSIZE;
+
   } // creates 16 super pages of size SUPERPGSIZE
   return (void *)p;
 }
@@ -55,7 +55,7 @@ freerange(void *pa_start, void *pa_end)
   void *start = free_super_pages(pa_start, pa_end);
   kmem.plain_page_start = start;
   char *p;
-  p = (char *)PGROUNDUP((uint64)pa_start);
+  p = (char *)PGROUNDUP((uint64)start);
   for (; p + PGSIZE <= (char *)pa_end; p += PGSIZE)
     kfree(p);
 }

@@ -74,6 +74,12 @@ sys_sbrk(void)
 }
 
 uint64
+sys_getmemsize(void)
+{
+  return myproc()->sz;
+}
+
+uint64
 sys_pause(void)
 {
   int n;

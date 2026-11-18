@@ -21,8 +21,12 @@ struct run {
 struct {
   struct spinlock lock;
   struct run *freelist;
+  struct run *superfreelist;
+  void *plain_page_start;
+
 } kmem;
 
+// For super pages we maintain a separate linked list of plates so that tracking both of them becomes easier, simpler.
 void
 kinit()
 {
@@ -30,13 +34,46 @@ kinit()
   freerange(end, (void *)PHYSTOP);
 }
 
+void *
+free_super_pages(void *pa_start, void *pa_end)
+{
+  char *p;
+  p = (char *)SUPERPGROUNDUP((uint64)pa_start);
+  for (int i = 0; i < 16; i++) {
+    ksuperfree(p);
+    p = p + SUPERPGSIZE;
+    if (p > (char *)pa_end) {
+      break;
+    }
+  } // creates 16 super pages of size SUPERPGSIZE
+  return (void *)p;
+}
+
 void
 freerange(void *pa_start, void *pa_end)
 {
+  void *start = free_super_pages(pa_start, pa_end);
+  kmem.plain_page_start = start;
   char *p;
   p = (char *)PGROUNDUP((uint64)pa_start);
   for (; p + PGSIZE <= (char *)pa_end; p += PGSIZE)
     kfree(p);
+}
+
+void
+ksuperfree(void *pa)
+{
+  struct run *r;
+  if (((uint64)pa % SUPERPGSIZE) != 0 || (char *)pa < end ||
+      (uint64)pa >= PHYSTOP)
+    panic("ksuperfree");
+
+  memset(pa, 1, SUPERPGSIZE);
+  r = (struct run *)pa;
+  acquire(&kmem.lock);
+  r->next = kmem.superfreelist;
+  kmem.superfreelist = r;
+  release(&kmem.lock);
 }
 
 // Free the page of physical memory pointed at by pa,
@@ -78,5 +115,21 @@ kalloc(void)
 
   if (r)
     memset((char *)r, 5, PGSIZE); // fill with junk
+  return (void *)r;
+}
+
+void *
+superkalloc(void)
+{
+  struct run *r;
+  acquire(&kmem.lock);
+  r = kmem.superfreelist;
+  if (r) {
+    kmem.superfreelist = kmem.superfreelist->next;
+  }
+  release(&kmem.lock);
+
+  if (r)
+    memset((char *)r, 5, SUPERPGSIZE);
   return (void *)r;
 }

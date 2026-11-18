@@ -392,6 +392,10 @@ typedef uint64 *pagetable_t; // 512 PTEs
 #define PGROUNDUP(sz)  (((sz) + PGSIZE - 1) & ~(PGSIZE - 1))
 #define PGROUNDDOWN(a) (((a)) & ~(PGSIZE - 1))
 
+#define SUPERPGSIZE          (2 * (1 << 20)) // bytes per page
+#define SUPERPGROUNDUP(sz)   (((sz) + SUPERPGSIZE - 1) & ~(SUPERPGSIZE - 1))
+#define SUPERPGROUNDDOWN(sz) (SUPERPGROUNDUP(sz) - SUPERPGSIZE)
+
 #define PTE_V (1L << 0) // valid
 #define PTE_R (1L << 1)
 #define PTE_W (1L << 2)
@@ -404,6 +408,7 @@ typedef uint64 *pagetable_t; // 512 PTEs
 #define PTE2PA(pte) (((pte) >> 10) << 12)
 
 #define PTE_FLAGS(pte) ((pte) & 0x3FF)
+#define PTE_LEAF(pte)  (((pte) & (PTE_R | PTE_W | PTE_X)) != 0)
 
 // extract the three 9-bit page table indices from a virtual address.
 #define PXMASK         0x1FF // 9 bits

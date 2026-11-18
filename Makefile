@@ -154,6 +154,7 @@ UPROGS=\
 	$U/_proc_demo\
 	$U/_testmemsize\
 	$U/_superpgtest\
+	$U/_bttest\
 
 
 fs.img: mkfs/mkfs README $(UPROGS)

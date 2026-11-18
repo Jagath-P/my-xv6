@@ -82,6 +82,7 @@ sys_getmemsize(void)
 uint64
 sys_pause(void)
 {
+  backtrace();
   int n;
   uint ticks0;
 

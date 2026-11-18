@@ -83,6 +83,35 @@ kvminithart()
   sfence_vma();
 }
 
+int
+mapsuper(pagetable_t pagetable, uint64 va, uint64 pa, int perm)
+{
+  if ((va % SUPERPGSIZE) != 0)
+    panic("mappages: va not aligned");
+
+  if (va >= MAXVA)
+    panic("mapsuper");
+
+  for (int level = 2; level > 1; level--) {
+    pte_t *pte = &pagetable[PX(level, va)];
+    if (*pte & PTE_V) {
+      pagetable = (pagetable_t)PTE2PA(*pte);
+    } else {
+      if ((pagetable = (pde_t *)kalloc()) == 0) {
+        return -1;
+      }
+      memset(pagetable, 0, PGSIZE);
+      *pte = PA2PTE(pagetable) | PTE_V;
+    }
+  }
+  pte_t *pte;
+  pte = &pagetable[PX(1, va)];
+  if (*pte & PTE_V)
+    panic("mappages: remap");
+  *pte = PA2PTE(pa) | perm | PTE_V;
+  return 0;
+}
+
 // Return the address of the PTE in page table pagetable
 // that corresponds to virtual address va.  If alloc!=0,
 // create any required page-table pages.
@@ -96,7 +125,7 @@ kvminithart()
 //   12..20 -- 9 bits of level-0 index.
 //    0..11 -- 12 bits of byte offset within the page.
 pte_t *
-walk(pagetable_t pagetable, uint64 va, int alloc)
+walk_lvl(pagetable_t pagetable, uint64 va, int alloc, int *lvl)
 {
   if (va >= MAXVA)
     panic("walk");
@@ -105,6 +134,10 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
     pte_t *pte = &pagetable[PX(level, va)];
     if (*pte & PTE_V) {
       pagetable = (pagetable_t)PTE2PA(*pte);
+      if (PTE_LEAF(*pte)) {
+        *lvl = level;
+        return pte;
+      }
     } else {
       if (!alloc || (pagetable = (pde_t *)kalloc()) == 0)
         return 0;
@@ -112,9 +145,9 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
       *pte = PA2PTE(pagetable) | PTE_V;
     }
   }
+  *lvl = 0;
   return &pagetable[PX(0, va)];
 }
-
 // Look up a virtual address, return the physical address,
 // or 0 if not mapped.
 // Can only be used to look up user pages.
@@ -302,20 +335,36 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   uint64 pa, i;
   uint flags;
   char *mem;
-
-  for (i = 0; i < sz; i += PGSIZE) {
-    if ((pte = walk(old, i, 0)) == 0)
-      continue; // page table entry hasn't been allocated
-    if ((*pte & PTE_V) == 0)
-      continue; // physical page hasn't been allocated
-    pa = PTE2PA(*pte);
+  int szinc = PGSIZE;
+  for (i = 0; i < sz; i += szinc) {
+    szinc = PGSIZE;
+    int level;
+    if ((pte = walk_lvl(old, i, 0, &level)) == 0)
+      continue;
+    if ((*pte & PTE_V) == 0) {
+      continue;
+    }
     flags = PTE_FLAGS(*pte);
-    if ((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char *)pa, PGSIZE);
-    if (mappages(new, i, PGSIZE, (uint64)mem, flags) != 0) {
-      kfree(mem);
-      goto err;
+    if (level == 1) {
+      szinc = SUPERPGSIZE;
+      pa = PTE2PA(*pte);
+      if ((mem = superkalloc()) == 0) {
+        goto err;
+      }
+      memmove(mem, (char *)pa, SUPERPGSIZE);
+      if (mapsuper(new, i, (uint64)mem, flags) != 0) {
+        ksuperfree(mem);
+        goto err;
+      }
+    } else {
+      pa = PTE2PA(*pte);
+      if ((mem = kalloc()) == 0)
+        goto err;
+      memmove(mem, (char *)pa, PGSIZE);
+      if (mappages(new, i, PGSIZE, (uint64)mem, flags) != 0) {
+        kfree(mem);
+        goto err;
+      }
     }
   }
   return 0;

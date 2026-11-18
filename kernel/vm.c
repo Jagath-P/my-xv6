@@ -128,7 +128,7 @@ pte_t *
 walk_lvl(pagetable_t pagetable, uint64 va, int alloc, int *lvl)
 {
   if (va >= MAXVA)
-    panic("walk");
+    panic("walk_lvl");
 
   for (int level = 2; level > 0; level--) {
     pte_t *pte = &pagetable[PX(level, va)];
@@ -160,7 +160,8 @@ walkaddr(pagetable_t pagetable, uint64 va)
   if (va >= MAXVA)
     return 0;
 
-  pte = walk(pagetable, va, 0);
+  int level;
+  pte = walk_lvl(pagetable, va, 0, &level);
   if (pte == 0)
     return 0;
   if ((*pte & PTE_V) == 0)
@@ -174,7 +175,7 @@ walkaddr(pagetable_t pagetable, uint64 va)
 // Create PTEs for virtual addresses starting at va that refer to
 // physical addresses starting at pa.
 // va and size MUST be page-aligned.
-// Returns 0 on success, -1 if walk() couldn't
+// Returns 0 on success, -1 if walk_lvl() couldn't
 // allocate a needed page-table page.
 int
 mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
@@ -194,7 +195,8 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
   a = va;
   last = va + size - PGSIZE;
   for (;;) {
-    if ((pte = walk(pagetable, a, 1)) == 0)
+    int level;
+    if ((pte = walk_lvl(pagetable, a, 1, &level)) == 0)
       return -1;
     if (*pte & PTE_V)
       panic("mappages: remap");
@@ -227,16 +229,39 @@ void
 uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 {
   uint64 a;
+  uint64 end = va + npages * PGSIZE;
   pte_t *pte;
+  int sz = PGSIZE;
 
   if ((va % PGSIZE) != 0)
     panic("uvmunmap: not aligned");
 
-  for (a = va; a < va + npages * PGSIZE; a += PGSIZE) {
-    if ((pte = walk(pagetable, a, 0)) == 0) // leaf page table entry allocated?
+  for (a = va; a < end; a += sz) {
+    int level;
+    sz = PGSIZE;
+    if ((pte = walk_lvl(pagetable, a, 0, &level)) ==
+        0) // leaf page table entry allocated?
       continue;
     if ((*pte & PTE_V) == 0) // has physical page been allocated?
       continue;
+    if (PTE_FLAGS(*pte) == PTE_V)
+      panic("uvmunmap: not a leaf");
+    if (level == 1) {
+      uint64 base = a & ~((uint64)SUPERPGSIZE - 1);
+      if (a == base && base + SUPERPGSIZE <= end) {
+        // whole superpage is being removed
+        if (do_free)
+          ksuperfree((void *)PTE2PA(*pte));
+        *pte = 0;
+        sz = SUPERPGSIZE;
+      } else {
+        // partial: split, then revisit the same address as a 4KB page
+        demote(pte);
+        sz = 0;
+      }
+      continue;
+    }
+
     if (do_free) {
       uint64 pa = PTE2PA(*pte);
       kfree((void *)pa);
@@ -252,12 +277,27 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
 {
   char *mem;
   uint64 a;
+  int sz;
 
   if (newsz < oldsz)
     return oldsz;
 
   oldsz = PGROUNDUP(oldsz);
-  for (a = oldsz; a < newsz; a += PGSIZE) {
+  for (a = oldsz; a < newsz; a += sz) {
+    if (a % SUPERPGSIZE == 0 && a + SUPERPGSIZE <= newsz) {
+      mem = superkalloc();
+      if (mem == 0) {
+        uvmdealloc(pagetable, a, oldsz);
+        return 0;
+      }
+      if (mapsuper(pagetable, a, (uint64)mem, PTE_R | PTE_U | xperm) != 0) {
+        ksuperfree(mem);
+        uvmdealloc(pagetable, a, oldsz);
+        return 0;
+      }
+      sz = SUPERPGSIZE;
+      continue;
+    }
     mem = kalloc();
     if (mem == 0) {
       uvmdealloc(pagetable, a, oldsz);
@@ -380,8 +420,8 @@ void
 uvmclear(pagetable_t pagetable, uint64 va)
 {
   pte_t *pte;
-
-  pte = walk(pagetable, va, 0);
+  int level;
+  pte = walk_lvl(pagetable, va, 0, &level);
   if (pte == 0)
     panic("uvmclear");
   *pte &= ~PTE_U;
@@ -408,7 +448,8 @@ copyout(pagetable_t pagetable, uint64 psz, uint64 dstva, char *src, uint64 len)
       }
     }
 
-    pte = walk(pagetable, va0, 0);
+    int level;
+    pte = walk_lvl(pagetable, va0, 0, &level);
     // forbid copyout over read-only user text pages.
     if ((*pte & PTE_W) == 0)
       return -1;
@@ -529,7 +570,8 @@ vmfault(pagetable_t pagetable, uint64 psz, uint64 va, int read)
 int
 ismapped(pagetable_t pagetable, uint64 va)
 {
-  pte_t *pte = walk(pagetable, va, 0);
+  int level;
+  pte_t *pte = walk_lvl(pagetable, va, 0, &level);
   if (pte == 0) {
     return 0;
   }

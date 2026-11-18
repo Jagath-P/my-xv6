@@ -33,6 +33,29 @@ Amane Uehara, Pablo Ventura, Luc Videau, Xi Wang, WaheedHafez, Keiichi
 Watanabe, Lucas Wolf, Nicolas Wolovick, wxdao, Grant Wu, x653, Andy
 Zhang, Jindong Zhang, Icenowy Zheng, ZhUyU1997, and Zou Chang Wei.
 
+ADDITIONS IN THIS COPY
+
+Changes made on top of xv6 for an OS course project:
+
+Super pages: user memory can be mapped as 2MB leaf pages (level 1 of the
+Sv39 page table). kalloc.c keeps a separate free list of 16 super pages;
+vm.c has walk_lvl, mapsuper and demote, and uvmalloc, uvmunmap, uvmcopy
+and walkaddr handle them. A partial free splits a super page into 4KB
+pages. Test: user/superpgtest.c.
+
+trace system call: trace(mask) prints each system call a process makes
+whose bit is set in mask. User program: user/trace.c.
+
+backtrace: prints the return addresses on the kernel stack (backtrace()
+in kernel/printk.c). Called from sys_pause; test: user/bttest.c.
+
+getmemsize system call: returns the size of the calling process's memory.
+Test: user/testmemsize.c.
+
+Not pushed yet: the sigalarm/sigreturn alarm test (done locally) and
+copy-on-write fork (in progress).
+
+
 ERROR REPORTS
 
 Please send errors and suggestions to Frans Kaashoek and Robert Morris
